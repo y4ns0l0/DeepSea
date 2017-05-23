@@ -1,4 +1,4 @@
-#!/usr/bin/python
+# -*- coding: utf-8 -*-
 
 import salt.client
 import salt.key
@@ -180,6 +180,7 @@ class HardwareProfile(object):
             if not label in self.rotates:
                 self.rotates[label] = drive['rotational']
             if not label in self.nvme:
+                # lshw can't detect the driver
                 self.nvme[label] = (drive['Driver'] == "nvme")
 
 
@@ -276,9 +277,9 @@ class DiskConfiguration(object):
         if servers:
             for server in servers:
                 ret = salt.utils.minions.mine_get(server, 'cephdisks.list', 'glob', options.__opts__)
+                # what if server of servers returns anything -> no profile, no notification
                 self.storage_nodes.update(ret)
         else:
-            # salt-call mine.get '*' freedisks.list
             ret = salt.utils.minions.mine_update('*', '', 'glob', options.__opts__)
             self.storage_nodes = salt.utils.minions.mine_get('*', 'cephdisks.list', 'glob', options.__opts__)
 
@@ -463,10 +464,10 @@ class CephRoles(object):
 
         self.root_dir = settings.root_dir
         self.networks = self._networks(self.servers)
-        self.public_network, self.cluster_network = self.public_cluster(self.networks)
+        self.public_networks, self.cluster_networks = self.public_cluster(self.networks)
 
         #self.master_contents = {}
-        self.available_roles = []
+        self.available_roles = [ 'storage' ]
 
     def _rgw_configurations(self):
         """
@@ -484,6 +485,22 @@ class CephRoles(object):
             else:
                 return [ 'rgw' ]
 
+    def _ganesha_configurations(self):
+        """
+        Use the custom names for ganesha configurations specified.  Otherwise,
+        default to 'ganesha'.
+        """
+        local = salt.client.LocalClient()
+
+        # Should we add a master_minion lookup and have two calls instead?
+        _ganeshas = local.cmd('*' , 'pillar.get', [ 'ganesha_configurations' ])
+        for node in _ganeshas.keys():
+            # Check the first one
+            if _ganeshas[node]:
+                return _ganeshas[node]
+            else:
+                return [ 'ganesha' ]
+
     def generate(self):
         """
         Create role named directories and create corresponding yaml files
@@ -499,7 +516,9 @@ class CephRoles(object):
         Create role named directories and create corresponding yaml files
         for every server.
         """
-        roles = [ 'admin', 'mon', 'storage', 'mds', 'igw', 'ganesha' ] + self._rgw_configurations()
+        roles = [ 'admin', 'mon', 'mds', 'igw', 'openattic' ]
+        roles += self._rgw_configurations()
+        roles += self._ganesha_configurations()
         self.available_roles.extend(roles)
 
         for role in roles:
@@ -571,13 +590,6 @@ class CephRoles(object):
         minion_dir = "{}/role-igw/stack/default/{}/minions".format(self.root_dir, self.cluster)
         self._add_pub_interface(minion_dir)
 
-    def ganesha_members(self):
-        """
-        Create a file for ganesha hosts.
-        """
-        minion_dir = "{}/role-ganesha/stack/default/{}/minions".format(self.root_dir, self.cluster)
-        self._add_pub_interface(minion_dir)
-
     def _add_pub_interface(self, minion_dir):
         if not os.path.isdir(minion_dir):
             _create_dirs(minion_dir, self.root_dir)
@@ -591,11 +603,12 @@ class CephRoles(object):
         """
         Find the public interface for a server
         """
-        public_net = ipaddress.ip_network(u'{}'.format(self.public_network))
-        for entry in self.networks[public_net]:
-            if entry[0] == server:
-                log.debug("Public interface for {}: {}".format(server, entry[2]))
-                return entry[2]
+        for public_network in self.public_networks:
+            public_net = ipaddress.ip_network(u'{}'.format(public_network))
+            for entry in self.networks[public_net]:
+                if entry[0] == server:
+                    log.debug("Public interface for {}: {}".format(server, entry[2]))
+                    return entry[2]
         return ""
 
 
@@ -610,8 +623,12 @@ class CephRoles(object):
             filename = "{}/cluster.yml".format(cluster_dir)
             contents = {}
             contents['fsid'] = str(uuid.uuid3(uuid.NAMESPACE_DNS, os.urandom(32)))
-            contents['public_network'] = self.public_network
-            contents['cluster_network'] = self.cluster_network
+
+            public_networks_str = ", ".join([str(n) for n in self.public_networks])
+            cluster_networks_str = ", ".join([str(n) for n in self.cluster_networks])
+
+            contents['public_network'] = public_networks_str
+            contents['cluster_network'] = cluster_networks_str
             contents['available_roles'] = self.available_roles
 
             self.writer.write(filename, contents)
@@ -662,21 +679,27 @@ class CephRoles(object):
         priorities = []
         for network in networks:
             quantity = len(networks[network])
-            # Minimum number of nodes, ignore other networks
-            if quantity > 3:
-                priorities.append( (len(networks[network]), network) )
-                log.debug("Including network {}".format(network))
-            else:
-                log.warn("Ignoring network {}".format(network))
+            priorities.append( (quantity, network) )
 
         if not priorities:
             raise ValueError("No network exists on at least 4 nodes")
 
         priorities = sorted(priorities, cmp=network_sort)
-        if len(priorities) == 1:
-            return str(priorities[0][1]), str(priorities[0][1])
-        else:
-            return str(priorities[0][1]), str(priorities[1][1])
+        public_networks = list()
+        cluster_networks = list()
+
+        for idx, (quantity, network) in enumerate(priorities):
+            if idx == 0 and quantity > 1:
+                public_networks.append(network)
+            elif idx == 1 and quantity > 1:
+                cluster_networks.append(network)
+            elif quantity == 1:
+                public_networks.append(network)
+
+        if not cluster_networks:
+            cluster_networks = public_networks
+
+        return public_networks, cluster_networks
 
 def network_sort(a, b):
     """
@@ -784,7 +807,7 @@ def show(**kwargs):
     for name in ceph_cluster.names:
         # Common cluster configuration
         ceph_storage = CephStorage(settings, name, salt_writer)
-        dc = DiskConfiguration(settings, ceph_cluster.minions)
+        dc = DiskConfiguration(settings, servers=ceph_cluster.minions)
         fields = [ 'Capacity', 'Device File', 'Model', 'rotational' ]
         for minion,details in dc.storage_nodes.iteritems():
             print minion + ":"
@@ -818,7 +841,7 @@ def proposals(**kwargs):
         ceph_storage = CephStorage(settings, name, salt_writer)
 
         ## Determine storage nodes and save proposals
-        disk_configuration = DiskConfiguration(settings, ceph_cluster.minions)
+        disk_configuration = DiskConfiguration(settings, servers=ceph_cluster.minions)
         disk_configuration.generate(hardwareprofile)
         ceph_storage.save(hardwareprofile.servers, disk_configuration.proposals)
 
@@ -828,6 +851,4 @@ def proposals(**kwargs):
         ceph_roles.cluster_config()
         ceph_roles.monitor_members()
         ceph_roles.igw_members()
-        ceph_roles.ganesha_members()
     return [ True ]
-

@@ -1,4 +1,4 @@
-#!/usr/bin/python
+# -*- coding: utf-8 -*-
 
 import salt.client
 import salt.config
@@ -185,7 +185,7 @@ def baseline(**kwargs):
     for id in ids:
         sys.stdout.write('.')
         sys.stdout.flush()
-        output = local_client.cmd(master_minion, 'cmd.run',
+        output = local_client.cmd(master_minion, 'cmd.shell',
                 ['ceph tell osd.{} bench'.format(id)])
         results.append(output)
 

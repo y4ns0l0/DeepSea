@@ -1,4 +1,4 @@
-#!/usr/bin/python
+# -*- coding: utf-8 -*-
 
 import os
 import struct
@@ -38,4 +38,7 @@ def file(component, name=None):
 
     if component == "rgw":
         return "/srv/salt/ceph/rgw/cache/" + name + ".keyring"
+
+    if component == "ganesha":
+        return "/srv/salt/ceph/ganesha/cache/" + name + ".keyring"
 

@@ -1,4 +1,4 @@
-#!/usr/bin/python
+# -*- coding: utf-8 -*-
 
 import salt.client
 import salt.utils.error
@@ -107,6 +107,28 @@ class ClusterAssignment(object):
             clusters.setdefault(cluster, []).append(minion)
         return clusters
 
+
+class Util(object):
+    """
+    This class contains static helper methods
+    """
+
+    @staticmethod
+    def parse_list_from_string(list_str, delim=','):
+        """
+        Transforms a string containing a list of elements separated
+        by a specific delimiter into a python list of elements
+
+        Args:
+            list_str (string): string with list of elements
+            delim    (string): string delimiter
+
+        Returns:
+            list: list of elements parsed from list_str
+        """
+        return [elem.strip() for elem in list_str.split(delim) if elem.strip()]
+
+
 class Validate(object):
     """
     Perform checks on pillar and grain data
@@ -120,10 +142,20 @@ class Validate(object):
         self.data = data
         self.grains = grains
         self.printer = printer
+        self.in_dev_env = self.__dev_env()
         self.passed = OrderedDict()
         self.errors = OrderedDict()
         self.warnings = OrderedDict()
         self._minion_check()
+
+    def __dev_env(self):
+        if 'DEV_ENV' in os.environ:
+            return os.environ['DEV_ENV'].lower() != 'false'
+        elif len(self.data.keys()) > 1:
+            any_minion = self.data.keys()[0]
+            if 'DEV_ENV' in self.data[any_minion]:
+                return self.data[any_minion]['DEV_ENV']
+        return False
 
     def _minion_check(self):
         """
@@ -138,6 +170,10 @@ class Validate(object):
         """
         if key not in self.errors and key not in self.warnings:
             self.passed[key] = "valid"
+
+    def dev_env(self):
+        if self.in_dev_env:
+            self.passed['DEV_ENV'] = "True"
 
     def fsid(self):
         """
@@ -171,22 +207,19 @@ class Validate(object):
         All nodes must have the same public network.  The public network
         must be valid.
         """
-        same_network = {}
         for node in self.data.keys():
             public_network = self.data[node].get("public_network", "")
-            log.debug("public_network: {} {}".format(node, public_network))
-            same_network[public_network] = ""
-            try:
-                ipaddress.ip_network(u'{}'.format(public_network))
-            except ValueError as err:
-                msg = "{} on {} is not valid".format(public_network, node)
-                self.errors.setdefault('public_network', []).append(msg)
+            net_list = Util.parse_list_from_string(public_network)
 
-        if len(same_network.keys()) > 1:
-            msg = "Different public networks {}".format(same_network.keys())
-            self.errors.setdefault('public_network', []).append(msg)
+            log.debug("public_network: {} {}".format(node, net_list))
+            for network in net_list:
+                try:
+                    ipaddress.ip_network(u'{}'.format(network))
+                except ValueError as err:
+                    msg = "{} on {} is not valid".format(network, node)
+                    self.errors.setdefault('public_network', []).append(msg)
 
-        self._set_pass_status('public_network')
+        self._set_pass_status('public_network');
 
     def public_interface(self):
         """
@@ -197,10 +230,12 @@ class Validate(object):
                 continue
             found = False
             public_network = self.data[node].get("public_network", "")
+	    net_list = Util.parse_list_from_string(public_network)
             for address in self.grains[node]['ipv4']:
                 try:
-                    if ipaddress.ip_address(u'{}'.format(address)) in ipaddress.ip_network(u'{}'.format(public_network)):
-                        found = True
+                    for network in net_list:
+                        if ipaddress.ip_address(u'{}'.format(address)) in ipaddress.ip_network(u'{}'.format(network)):
+                            found = True
                 except ValueError:
                     # Don't care about reporting a ValueError here if
                     # public_network is malformed, because the
@@ -242,7 +277,7 @@ class Validate(object):
                 if not 'storage' in self.data[node]:
                     missing.append(node)
 
-        if len(storage) < 4:
+        if len(storage) < 4 and not self.in_dev_env:
             msg = "Too few storage nodes {}".format(",".join(storage))
             self.errors['storage'] = [ msg ]
         else:
@@ -255,31 +290,65 @@ class Validate(object):
             else:
                 self.passed['storage'] = "valid"
 
+    def ganesha(self):
+        """
+        Nodes may only be assigned one ganesha role.  Ganesha depends on
+        cephfs or radosgw.
+        """
+        ganesha_roles = []
+        role_mds = False
+        role_rgw = False
+        role_ganesha = False
+
+        for node, data in self.data.items():
+            if ('roles' in data):
+                if('ganesha_configurations' in data):
+                    ganesha_roles = list(set(data.get("roles")) &
+                                        set(data.get("ganesha_configurations")))
+                    if len(ganesha_roles) > 1:
+                        msg = "minion {} has {} roles. Only one permitted".format(node, ganesha_roles)
+                        self.errors.setdefault('ganesha',[]).append(msg)
+                    if len(ganesha_roles) == 1:
+                        role_ganesha = True
+
+
+                if not (role_mds or role_rgw):
+                    if('mds' in data['roles']):
+                        role_mds = True
+                    if('rgw' in data['roles']):
+                        role_rgw=True
+                    if('rgw_configurations' in data):
+                        if(list(set(data.get("roles")) &
+                                set(data.get("rgw_configurations")))):
+                            role_rgw=True
+
+                if not role_ganesha:
+                    role_ganesha = 'ganesha' in data['roles']
+
+        if not (role_mds or role_rgw) and role_ganesha:
+            msg = "Ganesha requires either mds or rgw node in cluster."
+            self.errors['ganesha'] = msg
+
+        self._set_pass_status('ganesha')
+
     def cluster_network(self):
         """
         All storage nodes must have the same cluster network.  The cluster
         network must be valid.
         """
-        same_network = {}
         for node in self.data.keys():
             if ('roles' in self.data[node] and
                 'storage' in self.data[node]['roles']):
 
                 cluster_network = self.data[node].get("cluster_network", "")
-                log.debug("cluster_network: {} {}".format(node, cluster_network))
-                same_network[cluster_network] = ""
-                try:
-                    ipaddress.ip_network(u'{}'.format(cluster_network))
-                except ValueError as err:
-                    msg = "{} on {} is not valid".format(cluster_network, node)
-                    self.errors.setdefault('cluster_network', []).append(msg)
-
-        if len(same_network.keys()) > 1:
-            msg = "Different cluster networks {}".format(same_network.keys())
-            if 'cluster_network' in self.errors:
-                self.errors['cluster_network'].append(msg)
-            else:
-                self.errors['cluster_network'] = [ msg ]
+                net_list = Util.parse_list_from_string(cluster_network)
+                log.debug("cluster_network: {} {}".format(node, net_list))
+                for network in net_list:
+                    try:
+                        ipaddress.ip_network(u'{}'.format(network))
+                    except ValueError as err:
+                        msg = "{} on {} is not valid".format(network, node)
+                        self.errors.setdefault('cluster_network', []).append(msg)
 
         self._set_pass_status('cluster_network')
 
@@ -291,10 +360,12 @@ class Validate(object):
                 'storage' in self.data[node]['roles']):
                 found = False
                 cluster_network = self.data[node].get("cluster_network", "")
+	    	net_list = Util.parse_list_from_string(cluster_network)
                 for address in self.grains[node]['ipv4']:
                     try:
-                        if ipaddress.ip_address(u'{}'.format(address)) in ipaddress.ip_network(u'{}'.format(cluster_network)):
-                            found = True
+                        for network in net_list:
+                            if ipaddress.ip_address(u'{}'.format(address)) in ipaddress.ip_network(u'{}'.format(network)):
+                                found = True
                     except ValueError:
                         # Don't care about reporting a ValueError here if
                         # cluster_network is malformed, because the
@@ -505,7 +576,7 @@ class Validate(object):
         """
         JEWEL_VERSION="10.2"
         local = salt.client.LocalClient()
-        contents = local.cmd('*' , 'cmd.run', [ '/usr/bin/zypper info ceph' ], expr_form="glob")
+        contents = local.cmd('*' , 'cmd.shell', [ '/usr/bin/zypper info ceph' ], expr_form="glob")
 
         for minion in contents.keys():
             m = re.search(r'Version: (\S+)', contents[minion])
@@ -549,6 +620,7 @@ def pillar(cluster = None, printer=None, **kwargs):
     Check that the pillar for each cluster meets the requirements to install
     a Ceph cluster.
     """
+
     has_printer = printer is not None
     if not has_printer:
         printer = get_printer(**kwargs)
@@ -566,6 +638,7 @@ def pillar(cluster = None, printer=None, **kwargs):
     grains_data = local.cmd(search , 'grains.items', [], expr_form="compound")
 
     v = Validate(cluster, pillar_data, grains_data, printer)
+    v.dev_env()
     v.fsid()
     v.public_network()
     v.public_interface()
@@ -573,6 +646,7 @@ def pillar(cluster = None, printer=None, **kwargs):
     v.cluster_interface()
     v.monitors()
     v.storage()
+    v.ganesha()
     v.master_role()
     v.mon_host()
     v.mon_initial_members()

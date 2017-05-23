@@ -1,6 +1,7 @@
-#!/usr/bin/python
+# -*- coding: utf-8 -*-
 
 import os
+import errno
 import glob
 import yaml
 import pprint
@@ -55,7 +56,9 @@ All files are overwritten in the destination tree /srv/pillar/ceph/stack/default
 
 """
 
-stack = imp.load_source('pillar.stack', '/srv/modules/pillar/stack.py')
+cur_file_path = os.path.dirname(os.path.realpath(__file__))
+stack_path = os.path.abspath('{}/../pillar/stack.py'.format(cur_file_path))
+stack = imp.load_source('pillar.stack', stack_path)
 log = logging.getLogger(__name__)
 
 
@@ -171,6 +174,23 @@ class PillarData(object):
                             custom_split[1])
                     yml.write("# {}\n".format(custom))
                     yml.write("# Overwrites configuration in {}\n".format(custom_for))
+                    self._examples(custom, yml)
+
+
+    def _examples(self, custom, yml):
+        """
+        Provide commented examples for admin convenience
+        """
+        if 'cluster.yml' in custom:
+            text = '''
+              #rgw_configurations:
+              #  rgw:
+              #    users:
+              #      - { uid: "demo", name: "Demo", email: "demo@demo.nil" }
+              #      - { uid: "demo1", name: "Demo1", email: "demo1@demo.nil" }
+              '''
+            text = re.sub(re.compile("^ {14}", re.MULTILINE), "", text)
+            yml.write(text)
 
 
     def _merge(self, pathname, common):
@@ -193,6 +213,8 @@ class PillarData(object):
         common = {}
         with open(filename, "r") as policy:
             for line in policy:
+                # strip comments from the end of the line
+                line = re.sub('\s+#.*$', '', line)
                 line = line.rstrip()
                 if (line.startswith('#') or not line):
                     log.debug("Ignoring '{}'".format(line))
@@ -222,7 +244,6 @@ class PillarData(object):
                 log.debug("    {}".format(filename))
         return common
 
-
     def _parse(self, line):
         """
         Return globbed files constrained by optional slices or regexes.
@@ -244,11 +265,8 @@ class PillarData(object):
             files = glob.glob(line)
         return files
 
-
     def _shift_dir(self, path):
         """
         Remove the leftmost directory, expects beginning /
         """
         return "/".join(path.split('/')[2:])
-
-

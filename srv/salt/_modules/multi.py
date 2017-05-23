@@ -1,12 +1,24 @@
-#!/usr/bin/python
+# -*- coding: utf-8 -*-
 
 import logging
 import multiprocessing.dummy
 import multiprocessing
-import re
+import re, socket
 from subprocess import check_call, Popen, PIPE, CalledProcessError
 
 log = logging.getLogger(__name__)
+
+try:
+    from salt.utils import which
+except:
+    from distutils.spawn import which
+
+iperf_path = which('iperf3')
+
+if iperf_path is None:
+    log.error("Error: could not find iperf3 on path")
+
+localhost_name = socket.gethostname()
 
 '''
 multi is the module to call subprocess in minion host
@@ -40,14 +52,17 @@ def _summarize_iperf(result):
     '''
     host, rc, out, err = result
     msg = {}
+    msg['server'] = host
     if rc == 0:
-        msg['succeeded'] = host
+        msg['succeeded'] = True
     	msg['speed'] = out
-    	msg['filter'] = re.match(r'.*0.00-10.00.*sec\s(.*Bytes)\s+(.*Bytes/sec)', out, re.DOTALL ).group(2)
+    	msg['filter'] = re.match(r'.*0.00-10.00.*sec\s(.*Bytes)\s+(.*Mbits/sec)', out, re.DOTALL ).group(2)
     if rc == 1:
-        msg['failed'] = host
+        msg['succeeded'] = False
+        msg['failed'] = True
     if rc == 2:
-        msg['errored'] = host
+        msg['succeeded'] = False
+        msg['errored'] = True
     return msg
 
 def _summarize_ping(results):
@@ -114,9 +129,12 @@ def iperf_client_cmd( server, cpu=0, port=5200 ):
     .. code-block:: bash
     salt 'node' multi.iperf_client_cmd <server_name/ip> cpu=<which_cpu_core default 0> port=<default 5200>
     '''
-    if not server:
-        return False
-    iperf_cmd = [ "/usr/bin/iperf3", "-fM", "-A"+str(cpu), "-t10", "-c"+server, "-p"+str(port)]
+    if iperf_path is None or not server:
+        if not server:
+            return [ localhost_name, 2, "0", "Server name is empty" ]
+        else:
+            return [ localhost_name, 2, "0", "iperf3 not found in path, please install" ]
+    iperf_cmd = [ "/usr/bin/iperf3", "-fm", "-A"+str(cpu), "-t10", "-c"+server, "-p"+str(port)]
     log.debug('iperf_client_cmd: cmd {}'.format(iperf_cmd))
     proc = Popen(iperf_cmd, stdout=PIPE, stderr=PIPE)
     proc.wait()
@@ -130,6 +148,8 @@ def iperf_server_cmd( cpu=0, port=5200 ):
     .. code-block:: bash
     salt 'node' multi.iperf_server_cmd <server_name/ip> cpu=<which_cpu_core default 0> port=<default 5200>
     '''
+    if iperf_path is None:
+        return localhost_name + ": iperf3 not found in path, please install"
     iperf_cmd = [ "/usr/bin/iperf3", "-s", "-D", "-A"+str(cpu),  "-p"+str(port)]
     log.debug('iperf_server_cmd: cmd {}'.format(iperf_cmd))
     #with open( "/var/log/iperf_cpu" + str(cpu) + "_port" + str(port) + ".log", "wb") as out, \
@@ -137,7 +157,7 @@ def iperf_server_cmd( cpu=0, port=5200 ):
     #proc = Popen(iperf_cmd, stdout=out, stderr=err)
     proc = Popen(iperf_cmd);
     # it doesn't report fail so no need to check 
-    return True
+    return localhost_name + ": iperf3 started at cpu " +str(cpu) + " port " + str(port) + "\n"
 
 def kill_iperf_cmd():
     '''
@@ -185,6 +205,7 @@ def prepare_iperf_server():
 
     '''
     cpus = multiprocessing.cpu_count()
+    iperf_log = ""
     for cpu in range(cpus):
-        iperf_server_cmd( cpu, 5200+cpu )
-    return True
+        iperf_log += iperf_server_cmd( cpu, 5200+cpu ) 
+    return iperf_log

@@ -1,4 +1,4 @@
-#!/usr/bin/python
+# -*- coding: utf-8 -*-
 
 import salt.key
 import salt.client
@@ -68,3 +68,8 @@ def ready(**kwargs):
 
     return True
 
+def message(**kwargs):
+    """
+    Pass along a message
+    """
+    log.warn("{}".format(kwargs['content']))
