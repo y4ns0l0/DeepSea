@@ -50,7 +50,7 @@ version:
 setup.py:
 	sed "s/DEVVERSION/"$(VERSION)"/" setup.py.in > setup.py
 
-pyc: setup.py 
+pyc: setup.py
 	#make sure to create bytecode with the correct version
 	find srv/ -name '*.py' -exec $(PYTHON) -m py_compile {} \;
 	find cli/ -name '*.py' -exec $(PYTHON) -m py_compile {} \;
@@ -192,6 +192,7 @@ copy-files:
 	install -m 644 srv/pillar/ceph/benchmarks/templates/*.j2 $(DESTDIR)/srv/pillar/ceph/benchmarks/templates/
 	install -m 644 srv/pillar/ceph/init.sls $(DESTDIR)/srv/pillar/ceph/
 	install -m 644 srv/pillar/ceph/deepsea_minions.sls $(DESTDIR)/srv/pillar/ceph/
+	install -m 644 srv/pillar/ceph/drive_groups.sls $(DESTDIR)/srv/pillar/ceph/
 	install -m 644 srv/pillar/ceph/blacklist.sls $(DESTDIR)/srv/pillar/ceph/
 	install -d -m 755 $(DESTDIR)/srv/pillar/ceph/stack
 	install -m 644 srv/pillar/ceph/stack/stack.cfg $(DESTDIR)/srv/pillar/ceph/stack/stack.cfg
@@ -956,7 +957,7 @@ tarball:
 	rm -r $(TEMPDIR)
 
 test: setup.py
-	tox -e py27
+	tox -e py36
 
 lint: setup.py
 	tox -e lint
